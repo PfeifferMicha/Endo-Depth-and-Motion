@@ -28,6 +28,7 @@ def load_scene_files(scene: str) -> Dict[str, Union[List[str], np.ndarray]]:
             intrinsics = intrinsics
     """
     # -- Load list of files. (ordered but as string)
+    print("scene:", scene)
     list_color_images = order_list_paths_by_int_filename(
         list_files(str(Path(scene) / "color"))
     )

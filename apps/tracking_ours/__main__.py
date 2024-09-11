@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Number of floors of the pyramid.",
     )
+    parser.add_argument(
+        "--no_vis_3d",
+        action="store_true",
+    )
 
     return parser.parse_args()
 
@@ -95,10 +99,12 @@ def main():
     scene_number = args.start_scene
     frame_number = 0
     scene_info = None
-    vis_depth = o3d.visualization.Visualizer()
-    vis_3d = o3d.visualization.Visualizer()
-    vis_3d.create_window("HAMLYN3D", 1920 // 2, 1080 // 2)
-    vis_depth.create_window("Depth", 256, 192, visible=False)
+    no_vis_3d = args.no_vis_3d
+    if not no_vis_3d:
+        vis_depth = o3d.visualization.Visualizer()
+        vis_3d = o3d.visualization.Visualizer()
+        vis_3d.create_window("HAMLYN3D", 1920 // 2, 1080 // 2)
+        vis_depth.create_window("Depth", 256, 192, visible=False)
     estimated_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.0075)
     estimated_pose = np.eye(4)
     automode = False
@@ -127,13 +133,16 @@ def main():
             scene_info = hamlyn.load_scene_files(scene)
             frame_number = 0
             points = [np.array([0, 0, 0])]
-            vis_3d.clear_geometries()
-            vis_depth.clear_geometries()
-            vis_3d.add_geometry(estimated_frame)
+            if not no_vis_3d:
+                vis_3d.clear_geometries()
+                vis_depth.clear_geometries()
+                vis_3d.add_geometry(estimated_frame)
 
         # Get current camera
-        ctr = vis_3d.get_view_control()
-        cam = ctr.convert_to_pinhole_camera_parameters()
+        if not no_vis_3d:
+            ctr = vis_3d.get_view_control()
+            print(vis_3d.get_view_control(), vis_3d)
+            cam = ctr.convert_to_pinhole_camera_parameters()
 
         # -- Open pose
         estimated_frame.transform(np.linalg.inv(estimated_pose))
@@ -180,7 +189,8 @@ def main():
         # Keyframe updating
         if frame_number == 0:
             new_frame.modify_pose(c_pose_w=np.linalg.inv(np.eye(4)))
-            cam.extrinsic = np.eye(4)
+            if not no_vis_3d:
+                cam.extrinsic = np.eye(4)
 
         if frame_number % args.ratio_frame_keyframe == 0:
             logger.info("KEYFRAME INSERTED")
@@ -227,7 +237,8 @@ def main():
                 rgbd_image, intrinsic, new_frame.c_pose_w,
             )
 
-            vis_3d.add_geometry(pcd)
+            if not no_vis_3d:
+                vis_3d.add_geometry(pcd)
 
         else:
             pe.run(new_frame, True)
@@ -274,7 +285,8 @@ def main():
 
         estimated_pose = np.linalg.inv(new_frame.c_pose_w)
         estimated_frame.transform(estimated_pose)
-        vis_3d.update_geometry(estimated_frame)
+        if not no_vis_3d:
+            vis_3d.update_geometry(estimated_frame)
 
         if frame_number > 0:
             translation = estimated_pose[:, 3]
@@ -282,7 +294,8 @@ def main():
             points.append(new_point)
             line_mesh = LineMesh(points, radius=0.0005)
             line_mesh_geoms = line_mesh.cylinder_segments
-            vis_3d.add_geometry(*line_mesh_geoms)
+            if not no_vis_3d:
+                vis_3d.add_geometry(*line_mesh_geoms)
             del points[0]
 
         logger.info(
@@ -298,20 +311,28 @@ def main():
         pickle.dump(poses_register, a_file)
         a_file.close()
 
-        camera_ = o3d.camera.PinholeCameraParameters()
-        camera_.intrinsic = cam.intrinsic
-        camera_.extrinsic = cam.extrinsic
-        ctr.convert_from_pinhole_camera_parameters(camera_)
+        if not no_vis_3d:
+            camera_ = o3d.camera.PinholeCameraParameters()
+            camera_.intrinsic = cam.intrinsic
+            camera_.extrinsic = cam.extrinsic
+            ctr.convert_from_pinhole_camera_parameters(camera_)
         cv.imshow("HAMLYN", pilimage_to_numpy_array(frame))
 
-        while cv.getWindowProperty("HAMLYN", 0) >= 0:
+        while True:
 
-            vis_3d.poll_events()
-            vis_3d.update_renderer()
+            if not no_vis_3d:
+                if cv.getWindowProperty("HAMLYN", 0) < 0:
+                    break
+
+            if not no_vis_3d:
+                vis_3d.poll_events()
+                vis_3d.update_renderer()
             key = cv.waitKey(1) & 0xFF
             if automode:
                 if key == ord("s"):
                     automode = False
+                if frame_number +1 >= len(scene_info["list_color_images"]):
+                    done = True
                 frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
                 break
             if key == ord("a"):
@@ -357,8 +378,9 @@ def main():
             elif key == ord("q"):
                 logger.info(help_functions()[chr(key)])
                 done = True
-                vis_3d.destroy_window()
-                vis_depth.destroy_window()
+                if not no_vis_3d:
+                    vis_3d.destroy_window()
+                    vis_depth.destroy_window()
                 break
             elif key != 255:
                 logger.info(f"Unkown command, {chr(key)}")

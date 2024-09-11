@@ -159,6 +159,7 @@ def order_list_paths_by_int_filename(list_paths: List[str]) -> List[str]:
     Returns:
         List[str] -- Same list of paths in ascendent order.
     """
+    print("list_paths", list_paths)
     list_names_as_int = list(
         map(lambda x: int(x.split("/")[-1].split(".")[0]), list_paths)
     )

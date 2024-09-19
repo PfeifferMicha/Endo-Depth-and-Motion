@@ -8,6 +8,7 @@ import argparse
 import time
 import os
 import sys
+import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from edam.utils.parser import txt_to_nparray
@@ -40,6 +41,62 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
+class Loader:
+
+    def __init__( self, root_path ):
+
+
+        list_color_images = []
+        list_depth_images = []
+        intrinsic = None
+        color_path = os.path.join( root_path, "color" )
+        depth_path = os.path.join( root_path, "depth" )
+        filenames = [filename for filename in os.listdir( color_path )]
+
+        for filename in sorted( filenames ):
+            if "left" in filename and "png" in filename:
+                print("filename", filename)
+                left_filename = os.path.join( color_path, filename )
+                depth_filename = os.path.join( depth_path, filename.replace("left", "depth") )
+                left_config_filename = left_filename.replace( "png", "yml" )
+                print("depth", depth_filename, os.path.exists( depth_filename ))
+                print("config", left_config_filename, os.path.exists( left_config_filename ))
+                if os.path.exists( depth_filename ) and os.path.exists( left_config_filename ):
+                    print(left_filename, depth_filename)
+                    list_color_images.append( left_filename )
+                    list_depth_images.append( depth_filename )
+                    if intrinsic is None:
+                        with open( left_config_filename ) as stream:
+                            left_config = yaml.safe_load(stream)
+                            intrinsic_params = left_config["projection_matrix"]["data"]
+                            intrinsic = np.array( intrinsic_params ).reshape( (3,4) )
+                            print("intrinsic", intrinsic)
+
+        print("intrinsic", intrinsic)
+        depth = cv.imread( list_depth_images[0], cv.IMREAD_ANYDEPTH)\
+                    .astype(np.float32) / 1000  # meters
+        h, w = depth.shape
+
+        self.intrinsic = o3d.camera.PinholeCameraIntrinsic(
+            w,
+            h,
+            intrinsic[0, 0],  # fx
+            intrinsic[1, 1],  # fy
+            intrinsic[0, 2],  # cx
+            intrinsic[1, 2],  # cy
+        )
+        self.list_color_images = list_color_images
+        self.list_depth_images = list_depth_images
+
+    def get_frame( self, frame_number ):
+
+        color = o3d.io.read_image( self.list_color_images[frame_number] )
+        depth = cv.imread( self.list_depth_images[frame_number], cv.IMREAD_ANYDEPTH)\
+                    .astype(np.float32) / 1000  # meters
+
+        return color, depth, self.intrinsic
+
+
 
 def main():
     args = parse_args()
@@ -61,7 +118,9 @@ def main():
 
     # Create poses.log
     with open(os.path.join(folder_to_save_results, 'poses.log'), 'w') as traj:
+        print("WRITING:", os.path.join(folder_to_save_results, 'poses.log') )
         for i, pose in enumerate(poses):
+            print(pose)
             traj.write(f"0 0 {i}\n"
                        f"{pose[0, 0]} {pose[0, 1]} {pose[0, 2]} {pose[0, 3]}\n"
                        f"{pose[1, 0]} {pose[1, 1]} {pose[1, 2]} {pose[1, 3]}\n"
@@ -70,17 +129,19 @@ def main():
                        )
     trajectory = o3d.io.read_pinhole_camera_trajectory(os.path.join(folder_to_save_results, 'poses.log'))
     os.remove(os.path.join(folder_to_save_results, 'poses.log'))
-    _, _, intrinsic = load_frame(root, i)
+    print(root, i)
+    loader = Loader( root )
+    intrinsic = loader.intrinsic
     for i in frame_numbers:
         print("Changing intrinsics of the {:d}-th image.".format(i))
         trajectory.parameters[i].intrinsic = intrinsic
     o3d.io.write_pinhole_camera_trajectory(os.path.join(folder_to_save_results, 'trajectory.log'), trajectory)
 
-    rgbd_images = compute_rgbd_images(root, frame_numbers)
+    rgbd_images = compute_rgbd_images(loader, frame_numbers)
 
     # Volumetric fusion with TSDF
     begin = time.time()
-    mesh = tsdf_optimize(root, frame_numbers, rgbd_images, trajectory)
+    mesh = tsdf_optimize(loader, frame_numbers, rgbd_images, trajectory)
     end = time.time()
     time_tsdf = round((end - begin) * 1000)
     print("   Computing time of volumetric fusion {}ms".format(time_tsdf))
@@ -102,15 +163,15 @@ def main():
     print("\n-> Done!")
 
 
-def compute_rgbd_images(root, frame_numbers):
+def compute_rgbd_images(loader, frame_numbers):
     rgbd_images = []
     for i in frame_numbers:
         print("Store {:d}-th image into rgbd_images.".format(i))
-        color, depth, _ = load_frame(root, i)
+        color, depth, _ = loader.get_frame(i)
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             color,
             o3d.geometry.Image(depth),
-            depth_trunc=30000.0,
+            depth_trunc=0.35,
             depth_scale=1.0,
             convert_rgb_to_intensity=False
         )
@@ -119,7 +180,7 @@ def compute_rgbd_images(root, frame_numbers):
     return rgbd_images
 
 
-def tsdf_optimize(root, frame_numbers, rgbd_images, poses):
+def tsdf_optimize(loader, frame_numbers, rgbd_images, poses):
     tsdf = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=0.001,
         sdf_trunc=0.005,
@@ -128,7 +189,7 @@ def tsdf_optimize(root, frame_numbers, rgbd_images, poses):
 
     for i in frame_numbers:
         print("Integrate {:d}-th image into the volume.".format(i))
-        _, _, intrinsic = load_frame(root, i)
+        _, _, intrinsic = loader.get_frame( i)
         tsdf.integrate(rgbd_images[i], intrinsic, np.linalg.inv(poses.parameters[i].extrinsic))
 
     print("Extract a triangle mesh from the volume and visualize it.")
@@ -137,28 +198,28 @@ def tsdf_optimize(root, frame_numbers, rgbd_images, poses):
     return mesh
 
 
-def load_frame(root, frame_number: int):
-    color = o3d.io.read_image(os.path.join(root, "color", "{:010d}.jpg".format(frame_number)))
-    depth = cv.imread(os.path.join(root, "depth", "{:010d}.png".format(frame_number)), cv.IMREAD_ANYDEPTH)\
-                .astype(np.float32) / 1000  # meters
-    intrinsics = txt_to_nparray(os.path.join(root, "intrinsics.txt"))
-    k: np.ndarray = intrinsics[:3, :3]  # type: ignore
-
-    # -- Transform into tensors.
-    k = kornia.utils.image_to_tensor(k, keepdim=False).squeeze(1)  # Bx3x3
-
-    h, w = depth.shape
-
-    intrinsic = o3d.camera.PinholeCameraIntrinsic(
-        w,
-        h,
-        k[0, 0, 0],  # fx
-        k[0, 1, 1],  # fy
-        k[0, 0, 2],  # cx
-        k[0, 1, 2],  # cy
-    )
-
-    return color, depth, intrinsic
+#def load_frame(root, frame_number: int):
+#    color = o3d.io.read_image(os.path.join(root, "color", "{:010d}.jpg".format(frame_number)))
+#    depth = cv.imread(os.path.join(root, "depth", "{:010d}.png".format(frame_number)), cv.IMREAD_ANYDEPTH)\
+#                .astype(np.float32) / 1000  # meters
+#    intrinsics = txt_to_nparray(os.path.join(root, "intrinsics.txt"))
+#    k: np.ndarray = intrinsics[:3, :3]  # type: ignore
+#
+#    # -- Transform into tensors.
+#    k = kornia.utils.image_to_tensor(k, keepdim=False).squeeze(1)  # Bx3x3
+#
+#    h, w = depth.shape
+#
+#    intrinsic = o3d.camera.PinholeCameraIntrinsic(
+#        w,
+#        h,
+#        k[0, 0, 0],  # fx
+#        k[0, 1, 1],  # fy
+#        k[0, 0, 2],  # cx
+#        k[0, 1, 2],  # cy
+#    )
+#
+#    return color, depth, intrinsic
 
 
 if __name__ == "__main__":

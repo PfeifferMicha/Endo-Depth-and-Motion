@@ -15,6 +15,8 @@ import open3d as o3d
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from edam.dataset import hamlyn
+from edam.dataset.daVinci import daVinci
+from edam.dataset.aesculap import aesculap
 from edam.optimization.frame import create_frame
 from edam.optimization.pose_estimation import PoseEstimation
 from edam.optimization.utils_frame import synthetise_image_and_error
@@ -41,12 +43,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Shows the images from Hamlyn Dataset"
     )
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "-i",
         "--input_root_directory",
         type=str,
-        required=True,
         help="Root directory where scans are find. E.G. path/to/hamlyn_tracking_test_data",
+    )
+    group.add_argument(
+        "--input_scene_directory",
+        type=str,
+        help="Alternatively to giving the root, pass a scene directly using this argument."
     )
     parser.add_argument(
         "-d",
@@ -84,6 +91,10 @@ def parse_args() -> argparse.Namespace:
         help="Number of floors of the pyramid.",
     )
     parser.add_argument(
+        "--no_vis_2d",
+        action="store_true",
+    )
+    parser.add_argument(
         "--no_vis_3d",
         action="store_true",
     )
@@ -94,12 +105,16 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     device_name = args.device
-    list_scenes = list_files(args.input_root_directory)
+    if args.input_root_directory:
+        list_scenes = list_files(args.input_root_directory)
+    else:
+        list_scenes = [args.input_scene_directory]
     done = False
     scene_number = args.start_scene
     frame_number = 0
     scene_info = None
     no_vis_3d = args.no_vis_3d
+    no_vis_2d = args.no_vis_2d
     if not no_vis_3d:
         vis_depth = o3d.visualization.Visualizer()
         vis_3d = o3d.visualization.Visualizer()
@@ -123,6 +138,8 @@ def main():
     output_path = folder_to_save_results / (time.strftime("%Y%m%d-%H%M%S") + ".pkl")
     scales = args.scales_tracking
 
+    MAX_FRAME = 200
+
     while not done:
         begin = time.time()
 
@@ -130,7 +147,10 @@ def main():
         if scene_info is None:
             logger.info("Reseting scene.")
             scene = list_scenes[scene_number]
-            scene_info = hamlyn.load_scene_files(scene)
+            #scene_info = hamlyn.load_scene_files(scene)
+            color_path = os.path.join( scene, "color" )
+            depth_path = os.path.join( scene, "depth" )
+            scene_info = aesculap.load_scene_files( color_path, depth_path )
             frame_number = 0
             points = [np.array([0, 0, 0])]
             if not no_vis_3d:
@@ -154,7 +174,7 @@ def main():
             k_depth,
             h_d,
             w_d,
-        ) = load_hamlyn_frame(scene_info, frame_number)
+        ) = load_aesculap_frame(scene_info, frame_number)
 
         depth_image = numpy_array_to_pilimage(
             (
@@ -166,6 +186,8 @@ def main():
                 )
             ).astype(np.uint8)
         )
+
+ 
 
         gray = cv.cvtColor(
             pilimage_to_numpy_array(rgb_image_registered), cv.COLOR_BGR2GRAY
@@ -191,6 +213,10 @@ def main():
             new_frame.modify_pose(c_pose_w=np.linalg.inv(np.eye(4)))
             if not no_vis_3d:
                 cam.extrinsic = np.eye(4)
+
+
+        if frame_number >= MAX_FRAME:
+            done = True
 
         if frame_number % args.ratio_frame_keyframe == 0:
             logger.info("KEYFRAME INSERTED")
@@ -222,6 +248,7 @@ def main():
                     )
                 ),
                 o3d.geometry.Image(depth_np * 1000),
+                depth_trunc=0.25,
                 convert_rgb_to_intensity=False,
             )
 
@@ -316,78 +343,87 @@ def main():
             camera_.intrinsic = cam.intrinsic
             camera_.extrinsic = cam.extrinsic
             ctr.convert_from_pinhole_camera_parameters(camera_)
-        cv.imshow("HAMLYN", pilimage_to_numpy_array(frame))
+        if not no_vis_2d:
+            cv.imshow("HAMLYN", pilimage_to_numpy_array(frame))
+
+        if no_vis_2d:
+            automode = True
 
         while True:
 
-            if not no_vis_3d:
+            if not no_vis_2d:
                 if cv.getWindowProperty("HAMLYN", 0) < 0:
                     break
 
             if not no_vis_3d:
                 vis_3d.poll_events()
                 vis_3d.update_renderer()
-            key = cv.waitKey(1) & 0xFF
-            if automode:
-                if key == ord("s"):
-                    automode = False
+            if no_vis_2d:
+                frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
                 if frame_number +1 >= len(scene_info["list_color_images"]):
                     done = True
-                frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
                 break
-            if key == ord("a"):
-                automode = True
-                logger.info(help_functions()[chr(key)])
-                frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
-                break
-            if key == ord("n"):
-                logger.info(help_functions()[chr(key)])
-                frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
-                break
-            if key == ord("j"):
-                logger.info(help_functions()[chr(key)])
-                frame_number = (frame_number + 10) % len(
-                    scene_info["list_color_images"]
-                )
-                break
-            elif key == ord("p"):
-                logger.info(help_functions()[chr(key)])
-                frame_number = frame_number - 1
-                if frame_number < 0:
-                    frame_number = len(scene_info["list_color_images"]) - 1
-                break
-            elif key == ord(" "):
-                logger.info(help_functions()[chr(key)])
-                scene_number = (scene_number + 1) % len(list_scenes)
-                pe = PoseEstimation()
-                frame_number = 0
-                scene_info = None
-                break
-            elif key == ord("\x08"):
-                logger.info(help_functions()[chr(key)])
-                scene_number = scene_number - 1
-                pe = PoseEstimation()
-                if scene_number < 0:
-                    scene_number = len(list_scenes) - 1
-                frame_number = 0
-                scene_info = None
-                break
-            elif key == ord("h"):
-                logger.info(help_functions()[chr(key)])
-                print_help()
-            elif key == ord("q"):
-                logger.info(help_functions()[chr(key)])
-                done = True
-                if not no_vis_3d:
-                    vis_3d.destroy_window()
-                    vis_depth.destroy_window()
-                break
-            elif key != 255:
-                logger.info(f"Unkown command, {chr(key)}")
-                print("Use 'h' to print help and 'q' to quit.")
+            else:
+                key = cv.waitKey(1) & 0xFF
+                if automode:
+                    if key == ord("s"):
+                        automode = False
+                    if frame_number +1 >= len(scene_info["list_color_images"]):
+                        done = True
+                    frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
+                    break
+                if key == ord("a"):
+                    automode = True
+                    logger.info(help_functions()[chr(key)])
+                    frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
+                    break
+                if key == ord("n"):
+                    logger.info(help_functions()[chr(key)])
+                    frame_number = (frame_number + 1) % len(scene_info["list_color_images"])
+                    break
+                if key == ord("j"):
+                    logger.info(help_functions()[chr(key)])
+                    frame_number = (frame_number + 10) % len(
+                        scene_info["list_color_images"]
+                    )
+                    break
+                elif key == ord("p"):
+                    logger.info(help_functions()[chr(key)])
+                    frame_number = frame_number - 1
+                    if frame_number < 0:
+                        frame_number = len(scene_info["list_color_images"]) - 1
+                    break
+                elif key == ord(" "):
+                    logger.info(help_functions()[chr(key)])
+                    scene_number = (scene_number + 1) % len(list_scenes)
+                    pe = PoseEstimation()
+                    frame_number = 0
+                    scene_info = None
+                    break
+                elif key == ord("\x08"):
+                    logger.info(help_functions()[chr(key)])
+                    scene_number = scene_number - 1
+                    pe = PoseEstimation()
+                    if scene_number < 0:
+                        scene_number = len(list_scenes) - 1
+                    frame_number = 0
+                    scene_info = None
+                    break
+                elif key == ord("h"):
+                    logger.info(help_functions()[chr(key)])
+                    print_help()
+                elif key == ord("q"):
+                    logger.info(help_functions()[chr(key)])
+                    done = True
+                    if not no_vis_3d:
+                        vis_3d.destroy_window()
+                        vis_depth.destroy_window()
+                    break
+                elif key != 255:
+                    logger.info(f"Unkown command, {chr(key)}")
+                    print("Use 'h' to print help and 'q' to quit.")
 
-
-def load_hamlyn_frame(scene_info: Dict[str, List[str]], frame_number: int):
+def load_aesculap_frame(scene_info: Dict[str, List[str]], frame_number: int):
     """Function to load the scene and frame from the Hamlyn dataset,
 
     Args:
@@ -397,13 +433,99 @@ def load_hamlyn_frame(scene_info: Dict[str, List[str]], frame_number: int):
     Returns:
         [type]: [description]
     """
+
     # -- Open the rgb image.
     rgb_path = scene_info["list_color_images"][frame_number]
     rgb_image = pilimage_rgb_to_bgr(Image.open(rgb_path))
+    print(type(rgb_image), rgb_image.size, rgb_image.getextrema())
+
+    ## Grey out borders/hide daVinci UI:
+    #rgb_image[:, :border_top, :] = -0.458
+    #rgb_image[:, border_bottom:, :] = -0.458
+    #rgb_image[:, :, :border_left] = -0.458
+    #rgb_image[:, :, border_right:] = -0.458
+ 
+    rgb_image_np = pilimage_to_numpy_array(rgb_image)
+    print(type(rgb_image_np), rgb_image_np.shape, rgb_image_np.min(), rgb_image_np.max(), rgb_image_np.dtype)
+    # Grey out borders/hide daVinci UI:
+    rgb_image_np[:aesculap.border_top, :, :] = 0
+    rgb_image_np[aesculap.border_bottom:, :, :] = 0
+    rgb_image_np[:, :aesculap.border_left, :] = 0
+    rgb_image_np[:, aesculap.border_right:, :] = 0
+
+    print(type(rgb_image_np), rgb_image_np.shape, rgb_image_np.min(), rgb_image_np.max(), rgb_image_np.dtype)
+
+    # BGR to RGB
+    #rgb_image_np = np.flip( rgb_image_np, 2 )
+
+    rgb_image = numpy_array_to_pilimage( rgb_image_np, mode="RGB" )
+    print(type(rgb_image), rgb_image.size, rgb_image.getextrema())
 
     # -- Open the depth image.
     depth_path = scene_info["list_depth_images"][frame_number]
     depth_np = cv.imread(depth_path, cv.IMREAD_ANYDEPTH).astype(np.float32) / 1000
+    print("Depth range (m):", depth_np.min(), depth_np.max())
+
+    # -- Get the camera matrices.
+    k_depth: np.ndarray = scene_info["intrinsics"][:3, :3]  # type: ignore
+
+    # -- Transform into tensors.
+    k_depth = kornia.utils.image_to_tensor(k_depth, keepdim=False).squeeze(1)  # Bx3x3
+
+    h_d, w_d = depth_np.shape
+
+    return (
+        rgb_image,
+        depth_np,
+        k_depth,
+        h_d,
+        w_d,
+    )
+
+
+
+def load_davinci_frame(scene_info: Dict[str, List[str]], frame_number: int):
+    """Function to load the scene and frame from the Hamlyn dataset,
+
+    Args:
+        scene_info ([type]): [description]
+        frame_number (int): [description]
+
+    Returns:
+        [type]: [description]
+    """
+
+    # -- Open the rgb image.
+    rgb_path = scene_info["list_color_images"][frame_number]
+    rgb_image = pilimage_rgb_to_bgr(Image.open(rgb_path))
+    print(type(rgb_image), rgb_image.size, rgb_image.getextrema())
+
+    ## Grey out borders/hide daVinci UI:
+    #rgb_image[:, :border_top, :] = -0.458
+    #rgb_image[:, border_bottom:, :] = -0.458
+    #rgb_image[:, :, :border_left] = -0.458
+    #rgb_image[:, :, border_right:] = -0.458
+ 
+    rgb_image_np = pilimage_to_numpy_array(rgb_image)
+    print(type(rgb_image_np), rgb_image_np.shape, rgb_image_np.min(), rgb_image_np.max(), rgb_image_np.dtype)
+    # Grey out borders/hide daVinci UI:
+    rgb_image_np[:daVinci.border_top, :, :] = 0
+    rgb_image_np[daVinci.border_bottom:, :, :] = 0
+    rgb_image_np[:, :daVinci.border_left, :] = 0
+    rgb_image_np[:, daVinci.border_right:, :] = 0
+
+    print(type(rgb_image_np), rgb_image_np.shape, rgb_image_np.min(), rgb_image_np.max(), rgb_image_np.dtype)
+
+    # BGR to RGB
+    #rgb_image_np = np.flip( rgb_image_np, 2 )
+
+    rgb_image = numpy_array_to_pilimage( rgb_image_np, mode="RGB" )
+    print(type(rgb_image), rgb_image.size, rgb_image.getextrema())
+
+    # -- Open the depth image.
+    depth_path = scene_info["list_depth_images"][frame_number]
+    depth_np = cv.imread(depth_path, cv.IMREAD_ANYDEPTH).astype(np.float32) / 1000
+    print("Depth range (m):", depth_np.min(), depth_np.max())
 
     # -- Get the camera matrices.
     k_depth: np.ndarray = scene_info["intrinsics"][:3, :3]  # type: ignore

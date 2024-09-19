@@ -152,16 +152,20 @@ def test_simple(args):
 
             # Prediction
             input_image = input_image.to(device)
+            print("input:", input_image.min(), input_image.mean(), input_image.max())
             features = encoder(input_image)
             outputs = depth_decoder(features)
 
             disp = outputs[("disp", 0)]
+            print("disp:", disp.min(), disp.mean(), disp.max())
             disp_resized = torch.nn.functional.interpolate(
                 disp, (original_height, original_width), mode="bilinear", align_corners=False)
 
             disp_resized_np = disp_resized.squeeze().cpu().numpy()
             _, scaled_depth = disp_to_depth(disp_resized_np, 0.1, 100)  # Scaled depth
+            print("scaled_depth:", scaled_depth.min(), scaled_depth.mean(), scaled_depth.max())
             depth = scaled_depth * args.scale  # Metric scale (mm)
+            print("depth:", depth.min(), depth.mean(), depth.max(), args.saturation_depth)
             depth[depth > args.saturation_depth] = args.saturation_depth
             end = time.time()
 
@@ -179,7 +183,9 @@ def test_simple(args):
             else:
                 # Saving grayscale depth image
                 im_depth = depth.astype(np.uint16)
+                print("im_depth", im_depth.min(), im_depth.max())
                 im = pil.fromarray(im_depth)
+                print("im", im.getextrema())
                 output_name = os.path.splitext(os.path.basename(image_path))[0]
                 output_file = os.path.join(output_path, "{}_depth.png".format(output_name))
                 im.save(output_file)

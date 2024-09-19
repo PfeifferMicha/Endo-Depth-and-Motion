@@ -29,12 +29,38 @@ def load_scene_files(scene: str) -> Dict[str, Union[List[str], np.ndarray]]:
     """
     # -- Load list of files. (ordered but as string)
     print("scene:", scene)
-    list_color_images = order_list_paths_by_int_filename(
+    #list_color_images = order_list_paths_by_int_filename(
+    #    list_files(str(Path(scene) / "color"))
+    #)
+    list_color_images = sorted(
         list_files(str(Path(scene) / "color"))
-    )
-    list_depth_images = order_list_paths_by_int_filename(
+        )
+    #list_depth_images = order_list_paths_by_int_filename(
+    #    list_files(str(Path(scene) / "depth"))
+    #)
+    list_depth_images = sorted(
         list_files(str(Path(scene) / "depth"))
+        )
+    #list_depth_images = order_list_paths_by_int_filename(
+    #    list_files(str(Path(scene) / "depth"))
+    #)
+
+    # -- Open intrinsic and extrinsic files.
+    if (Path(scene) / "extrinsics.txt").is_file():
+        extrinsics = txt_to_nparray(
+            open(Path(scene) / "extrinsics.txt")
+        )
+    intrinsics = txt_to_nparray(
+        open(Path(scene) / "intrinsics.txt")
     )
+
+    if (Path(scene) / "extrinsics.txt").is_file():
+        return dict(
+            list_color_images=list_color_images,
+            list_depth_images=list_depth_images,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+        )
 
     # -- Open intrinsic and extrinsic files.
     if (Path(scene) / "extrinsics.txt").is_file():

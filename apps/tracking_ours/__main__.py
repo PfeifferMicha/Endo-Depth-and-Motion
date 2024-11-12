@@ -30,7 +30,7 @@ from edam.utils.image.pilimage import (
     pilimage_rgb_to_bgr,
     pilimage_v_concat,
 )
-from edam.utils.depth import depth_to_color
+from edam.utils.depth import depth_to_color, depth_edge_mask_from_angles
 from edam.utils.LineMesh import LineMesh
 
 
@@ -98,6 +98,10 @@ def parse_args() -> argparse.Namespace:
         "--no_vis_3d",
         action="store_true",
     )
+    parser.add_argument(
+        "--depth_folder",
+        type=str,
+        default="depth_anything_v2")
 
     return parser.parse_args()
 
@@ -139,6 +143,9 @@ def main():
     scales = args.scales_tracking
 
     MAX_FRAME = 200
+    
+    prev_pos = None
+    #prev_dir = None
 
     while not done:
         begin = time.time()
@@ -149,7 +156,8 @@ def main():
             scene = list_scenes[scene_number]
             #scene_info = hamlyn.load_scene_files(scene)
             color_path = os.path.join( scene, "color" )
-            depth_path = os.path.join( scene, "depth" )
+            #depth_path = os.path.join( scene, "depth" )
+            depth_path = os.path.join( scene, args.depth_folder )
             scene_info = aesculap.load_scene_files( color_path, depth_path )
             frame_number = 0
             points = [np.array([0, 0, 0])]
@@ -186,8 +194,6 @@ def main():
                 )
             ).astype(np.uint8)
         )
-
- 
 
         gray = cv.cvtColor(
             pilimage_to_numpy_array(rgb_image_registered), cv.COLOR_BGR2GRAY
@@ -241,13 +247,15 @@ def main():
             ref_kf = pe.reference_keyframe
             keyframe_image = rgb_image_registered.copy()
             keyframe_depth_image = depth_image.copy()
+            print(depth_np.dtype)
             rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
                 o3d.geometry.Image(
                     cv.cvtColor(
                         pilimage_to_numpy_array(keyframe_image), cv.COLOR_BGR2RGB
                     )
                 ),
-                o3d.geometry.Image(depth_np * 1000),
+                #o3d.geometry.Image(depth_np * 1000),
+                o3d.geometry.Image(depth_np),
                 depth_trunc=0.25,
                 convert_rgb_to_intensity=False,
             )
@@ -274,6 +282,19 @@ def main():
         end = time.time()
         time_one_image = round((end - begin) * 1000)
         print("   Computing time {}ms".format(time_one_image))
+
+        print("Estimated pose:", new_frame.c_pose_w)
+        # Check for large jumps:
+        cur_pos = new_frame.c_pose_w[0:3,3]
+        print("\tExtracted pos:", cur_pos)
+        if prev_pos is not None:
+            dist = np.linalg.norm( cur_pos - prev_pos )
+            print(f"\tdist to prev pos: {dist}")
+            if dist > 1e-2:
+                print("\t", "Large jump detected, ending!")
+                break
+
+        prev_pos = cur_pos  # Save for next frame
 
         (error_np, synthetic_image_np) = synthetise_image_and_error(
             i_pose_w=ref_kf.c_pose_w_tc,
@@ -463,8 +484,21 @@ def load_aesculap_frame(scene_info: Dict[str, List[str]], frame_number: int):
 
     # -- Open the depth image.
     depth_path = scene_info["list_depth_images"][frame_number]
-    depth_np = cv.imread(depth_path, cv.IMREAD_ANYDEPTH).astype(np.float32) / 1000
-    print("Depth range (m):", depth_np.min(), depth_np.max())
+    #depth_np = cv.imread(depth_path, cv.IMREAD_ANYDEPTH).astype(np.float32) / 1000
+    with open( depth_path, 'rb' ) as f:
+        depth_np = np.load( f )
+    depth_np = depth_np.astype( np.float32 )
+    depth_np = depth_np / 1000
+    print("Depth range (m):", depth_np.min(), depth_np.max(), depth_np.dtype )
+
+    # Avoid zeros:
+    depth_np[depth_np < 2e-2] = 9999
+    #depth_np[depth_np < 3e-2] = 9999
+    #depth_np[depth_np > 8e-2] = 9999  # transfer-depth becomes unreliable at around 10 cm?
+    #
+
+    #edge_mask = depth_edge_mask_from_angles( depth_np, scene_info["camera_parameters"] )
+    #depth_np[edge_mask] = 9999
 
     # -- Get the camera matrices.
     k_depth: np.ndarray = scene_info["intrinsics"][:3, :3]  # type: ignore
@@ -473,6 +507,8 @@ def load_aesculap_frame(scene_info: Dict[str, List[str]], frame_number: int):
     k_depth = kornia.utils.image_to_tensor(k_depth, keepdim=False).squeeze(1)  # Bx3x3
 
     h_d, w_d = depth_np.shape
+
+    print("depth shape:", h_d, w_d)
 
     return (
         rgb_image,
@@ -524,7 +560,11 @@ def load_davinci_frame(scene_info: Dict[str, List[str]], frame_number: int):
 
     # -- Open the depth image.
     depth_path = scene_info["list_depth_images"][frame_number]
-    depth_np = cv.imread(depth_path, cv.IMREAD_ANYDEPTH).astype(np.float32) / 1000
+    with open( depth_path, 'rb' ) as f:
+        depth_np = np.load( f )
+    depth_np = depth_np / 1000
+    depth_np = depth_np.astype( np.float32 )
+    #depth_np = cv.imread(depth_path, cv.IMREAD_ANYDEPTH).astype(np.float32) / 1000
     print("Depth range (m):", depth_np.min(), depth_np.max())
 
     # -- Get the camera matrices.
